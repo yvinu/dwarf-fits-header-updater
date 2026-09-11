@@ -58,15 +58,23 @@ def parse_filename_and_path(filepath: str | Path) -> Dict[str, Any]:
     path = Path(filepath)
     filename = path.name
     path_str = str(path)
+    parts_lower = [p.lower() for p in path.parts]
+
+    is_cali_frame = "cali_frame" in parts_lower
 
     # 1. Image Type (dark, flat, bias, light)
-    imtype_raw = "dark"
+    imtype_raw = None
     for cand in ("bias", "flat", "dark", "light"):
         if re.search(r"(?:^|[_\-/\\])" + cand + r"(?:[_\-/\\]|\.fits?)", path_str, re.IGNORECASE):
             imtype_raw = cand
             break
 
-    imtype, frame = IMAGETYP_MAP.get(imtype_raw, ("Dark Frame", "Dark"))
+    # If no explicit image type was found:
+    # Files inside CALI_FRAME default to 'dark', files outside CALI_FRAME default to 'light'
+    if imtype_raw is None:
+        imtype_raw = "dark" if is_cali_frame else "light"
+
+    imtype, frame = IMAGETYP_MAP.get(imtype_raw, ("Light Frame", "Light"))
 
     # 2. Exposure time (EXPTIME)
     exp_m = re.search(r"exp[_\-](?P<exp>[0-9.]+)", filename, re.IGNORECASE) or re.search(r"exp[_\-](?P<exp>[0-9.]+)", path_str, re.IGNORECASE)
@@ -145,7 +153,8 @@ def calculate_derived_fields(parsed: Dict[str, Any]) -> Dict[str, Any]:
     stack = parsed.get("STACKCNT", 1)
 
     livetime = (exp * stack) if (exp is not None and stack is not None) else None
-    darktime = livetime
+    # DARKTIME is relevant ONLY for Dark frames
+    darktime = livetime if (parsed.get("imtype_raw") == "dark") else None
     pix_sz = DWARF_MINI_SPECS["NATIVE_PIXEL_SIZE"] * binning
     focal_len = DWARF_MINI_SPECS["FOCALLEN"]
 
@@ -231,7 +240,7 @@ def update_fits_header(
             ("EXTEND", True, "FITS dataset may contain extensions"),
             ("BZERO", float(bzero), "Offset data range to that of unsigned short"),
             ("BSCALE", float(bscale), "Default scaling factor"),
-            ("PROGRAM", "DWARF Header Updater v1.1", "Software that created this HDU"),
+            ("PROGRAM", "DWARF Header Updater v1.2", "Software that created this HDU"),
             ("DATE", now_utc, "UTC date that FITS file was created"),
             ("IMAGETYP", parsed["IMAGETYP"], "Type of image"),
             ("ROWORDER", "TOP-DOWN", "Order of the rows in image array"),
@@ -279,7 +288,8 @@ def update_fits_header(
         if derived["LIVETIME"] is not None:
             header_updates.append(("LIVETIME", float(derived["LIVETIME"]), "[s] Exposure time after deadtime correction"))
 
-        if derived["DARKTIME"] is not None:
+        # DARKTIME: Relevant ONLY for Dark frames
+        if derived["DARKTIME"] is not None and parsed["imtype_raw"] == "dark":
             header_updates.append(("DARKTIME", float(derived["DARKTIME"]), "Total Dark Exposure Time (s)"))
 
         if parsed.get("CAMNAME"):
