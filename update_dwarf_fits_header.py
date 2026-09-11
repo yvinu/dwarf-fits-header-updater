@@ -230,6 +230,19 @@ def update_fits_header(
 
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
+        # Purge DARKTIME from non-dark frames
+        if parsed["imtype_raw"] != "dark" and "DARKTIME" in header:
+            del header["DARKTIME"]
+
+        # Auto-correct misclassified image type headers on Light frames (e.g. from previous script runs)
+        if parsed["imtype_raw"] == "light":
+            if header.get("IMAGETYP") in ("Dark Frame", "Dark"):
+                header["IMAGETYP"] = (parsed["IMAGETYP"], "Type of image")
+            if header.get("FRAME") in ("Dark Frame", "Dark"):
+                header["FRAME"] = (parsed["FRAME"], "Frame Type")
+            if header.get("OBJECT") in ("Dark Frame", "Dark"):
+                header["OBJECT"] = (parsed["FRAME"], "Name of the object of interest")
+
         # Key-Value pairs with comments matching FITS_STANDARD.txt
         header_updates: list[tuple[str, Any, str]] = [
             ("SIMPLE", True, "file does conform to FITS standard"),
