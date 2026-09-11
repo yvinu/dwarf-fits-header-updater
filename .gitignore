@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDEs & Editors
+.vscode/
+.idea/
+
+# Astronomy Calibration Data & FITS files
+*.fits
+*.fit
+*.FITS
+*.FIT
+CALI_FRAME/
+RESTACKED/
+DSL_SIRIL_PROCESS*/
+scratch/
