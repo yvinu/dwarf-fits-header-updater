@@ -1,10 +1,13 @@
 # DWARF Mini FITS Header Updater
 
-A Python utility for standardizing and populating FITS headers of master calibration frames (darks, flats, biases) created by the **DWARF Mini smart telescope** to match astronomical standards and software expectations (such as Siril, PixInsight, and Astro Pixel Processor).
+A Python utility for standardizing and populating FITS headers of master calibration frames (darks, flats, biases, lights) created by the **DWARF Mini smart telescope** to match astronomical standards and software expectations (such as Siril, PixInsight, and Astro Pixel Processor).
 
 ## Features
 
-- **Automated Filename Metadata Parsing**: Extracts `IMAGETYP`, `FRAME`, exposure duration (`EXPTIME`), gain (`GAIN`), binning (`XBINNING`/`YBINNING`), temperature (`CCD-TEMP`), and stack count (`STACKCNT`) from standard DWARF filenames (e.g. `dark_exp_15.000000_gain_60_bin_1_33C_stack_20.fits`).
+- **Automated Filename & Path Metadata Parsing**: Parses `IMAGETYP`, `FRAME`, exposure duration (`EXPTIME`), gain (`GAIN`), binning (`XBINNING`/`YBINNING`), temperature (`CCD-TEMP`), stack count (`STACKCNT`), camera module (`CAMNAME`), and filter (`FILTER`) from filenames and parent folder structures (e.g. `CALI_FRAME/bias/cam_0/bias_gain_2_bin_1.fits` or `flat_gain_2_bin_1_ir_1.fits`).
+- **Camera Module Detection**: Identifies `cam_0` as **TELE** and `cam_1` as **WIDE** based on folder structure or filename tokens.
+- **Filter Detection**: Detects DWARF Mini filter modes for flat frames (`ir_1` = **Astro**, `ir_2` = **Dual-Band**). Omits `FILTER` card if omitted.
+- **Temperature Handling**: Omits `CCD-TEMP` and `FOCTEMP` cards if no temperature information is present in the filename, folder path, or pre-existing FITS header (never defaults to 0).
 - **DWARF Mini Spec Alignment**: Automatically populates physical hardware specifications:
   - Objective Aperture (`APTDIA`): **30.0 mm**
   - Focal Length (`FOCALLEN`): **150.0 mm** (f/5.0)
@@ -40,7 +43,7 @@ pip install astropy
 Preview extracted parameters and header updates without altering disk files:
 
 ```bash
-python3 update_dwarf_fits_header.py dark_exp_15.000000_gain_60_bin_1_33C_stack_20.fits --dry-run
+python3 update_dwarf_fits_header.py CALI_FRAME --dry-run
 ```
 
 ### 2. Single File Update
@@ -48,18 +51,18 @@ python3 update_dwarf_fits_header.py dark_exp_15.000000_gain_60_bin_1_33C_stack_2
 Update a FITS file header in-place:
 
 ```bash
-python3 update_dwarf_fits_header.py dark_exp_15.000000_gain_60_bin_1_33C_stack_20.fits --in-place
+python3 update_dwarf_fits_header.py CALI_FRAME/flat/cam_0/flat_gain_2_bin_1_ir_1.fits --in-place
 ```
 
 Or save as a new updated file (`_updated.fits`):
 
 ```bash
-python3 update_dwarf_fits_header.py dark_exp_15.000000_gain_60_bin_1_33C_stack_20.fits
+python3 update_dwarf_fits_header.py CALI_FRAME/flat/cam_0/flat_gain_2_bin_1_ir_1.fits
 ```
 
 ### 3. Calibration Directory Batch Update
 
-Traverse a calibration library structure (e.g., `CALI_FRAME/`) and update all dark master headers in place:
+Traverse a calibration library structure (e.g., `CALI_FRAME/`) and update all calibration headers in place:
 
 ```bash
 python3 update_dwarf_fits_header.py CALI_FRAME --in-place
@@ -70,7 +73,7 @@ python3 update_dwarf_fits_header.py CALI_FRAME --in-place
 Filter frame types when scanning directories (`dark`, `flat`, `bias`, `light`, or `all`):
 
 ```bash
-python3 update_dwarf_fits_header.py CALI_FRAME --type dark --in-place
+python3 update_dwarf_fits_header.py CALI_FRAME --type flat --in-place
 ```
 
 ---
@@ -86,7 +89,7 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
   --type {dark,flat,bias,light,all}
-                        Filter frame type when scanning directories (default: dark)
+                        Filter frame type when scanning directories (default: all)
   --in-place            Modify the FITS file(s) directly in place
   --output OUTPUT, -o OUTPUT
                         Output filepath (only applicable when processing a single FITS file)

@@ -2,8 +2,8 @@
 """
 update_dwarf_fits_header.py
 
-Updates the FITS header of DWARF Mini calibration master frames (e.g., master darks,
-flats, biases) based on information encoded in the filename, published DWARF Mini
+Updates the FITS header of DWARF Mini calibration master frames (dark, flat, bias, light)
+based on information encoded in the filename, parent folder structure, published DWARF Mini
 hardware specifications, and standard FITS header keywords defined in FITS_STANDARD.txt.
 
 DWARF Mini Specifications:
@@ -12,9 +12,8 @@ DWARF Mini Specifications:
 - Sensor (INSTRUME): Sony IMX662
 - Native Pixel Size (XPIXSZ, YPIXSZ): 2.90 um
 - Plate Scale (SCALE): ~3.987789 arcsec/pixel (at bin 1)
-
-Filename Convention Example:
-dark_exp_15.000000_gain_60_bin_1_33C_stack_20.fits
+- Cameras: TELE (cam_0) / WIDE (cam_1)
+- Filters: Astro (ir_1) / Dual-Band (ir_2)
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 try:
     from astropy.io import fits
@@ -43,18 +42,6 @@ DWARF_MINI_SPECS = {
     "NATIVE_PIXEL_SIZE": 2.90,  # um
 }
 
-# Regex to extract parameters from DWARF Mini calibration master filename
-# Matches pattern: {type}_exp_{exposure}_gain_{gain}_bin_{bin}_{temp}C_stack_{stack}.fits
-FILENAME_REGEX = re.compile(
-    r"(?P<imtype>dark|flat|bias|light)"
-    r"[_-]exp[_-](?P<exp>[0-9.]+)"
-    r"[_-]gain[_-](?P<gain>[0-9.]+)"
-    r"[_-]bin[_-](?P<bin>[0-9]+)"
-    r"[_-](?P<temp>[-+]?[0-9.]+)C"
-    r"[_-]stack[_-](?P<stack>[0-9]+)",
-    re.IGNORECASE
-)
-
 IMAGETYP_MAP = {
     "dark": ("Dark Frame", "Dark"),
     "flat": ("Flat Frame", "Flat"),
@@ -63,28 +50,71 @@ IMAGETYP_MAP = {
 }
 
 
-def parse_filename(filepath: str | Path) -> Dict[str, Any]:
+def parse_filename_and_path(filepath: str | Path) -> Dict[str, Any]:
     """
-    Parse metadata encoded in the FITS filename.
-    Returns a dictionary of extracted parameters.
+    Parse metadata encoded in the FITS filename and parent directory path structure.
+    Extracts image type, exposure, gain, binning, temperature, stack count, camera module, and filter mode.
     """
-    filename = Path(filepath).name
-    match = FILENAME_REGEX.search(filename)
-    if not match:
-        raise ValueError(
-            f"Filename '{filename}' does not match expected DWARF calibration pattern: "
-            "'{type}_exp_{exp}_gain_{gain}_bin_{bin}_{temp}C_stack_{stack}.fits'"
-        )
+    path = Path(filepath)
+    filename = path.name
+    path_str = str(path)
 
-    imtype_raw = match.group("imtype").lower()
+    # 1. Image Type (dark, flat, bias, light)
+    imtype_raw = "dark"
+    for cand in ("bias", "flat", "dark", "light"):
+        if re.search(r"(?:^|[_\-/\\])" + cand + r"(?:[_\-/\\]|\.fits?)", path_str, re.IGNORECASE):
+            imtype_raw = cand
+            break
+
     imtype, frame = IMAGETYP_MAP.get(imtype_raw, ("Dark Frame", "Dark"))
 
-    exp = float(match.group("exp"))
-    gain_val = float(match.group("gain"))
-    gain = int(gain_val) if gain_val.is_integer() else gain_val
-    binning = int(match.group("bin"))
-    temp = float(match.group("temp"))
-    stack = int(match.group("stack"))
+    # 2. Exposure time (EXPTIME)
+    exp_m = re.search(r"exp[_\-](?P<exp>[0-9.]+)", filename, re.IGNORECASE) or re.search(r"exp[_\-](?P<exp>[0-9.]+)", path_str, re.IGNORECASE)
+    if exp_m:
+        exp: Optional[float] = float(exp_m.group("exp"))
+    elif imtype_raw == "bias":
+        exp = 0.0
+    else:
+        exp = None
+
+    # 3. Gain (GAIN)
+    gain_m = re.search(r"gain[_\-](?P<gain>[0-9.]+)", filename, re.IGNORECASE) or re.search(r"gain[_\-](?P<gain>[0-9.]+)", path_str, re.IGNORECASE)
+    if gain_m:
+        gain_val = float(gain_m.group("gain"))
+        gain: Optional[Union[int, float]] = int(gain_val) if gain_val.is_integer() else gain_val
+    else:
+        gain = None
+
+    # 4. Binning (XBINNING / YBINNING)
+    bin_m = re.search(r"bin[_\-](?P<bin>[0-9]+)", filename, re.IGNORECASE) or re.search(r"bin[_\-](?P<bin>[0-9]+)", path_str, re.IGNORECASE)
+    binning = int(bin_m.group("bin")) if bin_m else 1
+
+    # 5. Temperature (CCD-TEMP)
+    # Require preceded by non-letter, e.g. 33C, -10C, 33.5C
+    # If no temperature is explicitly in filename or folder name, temp is None (do NOT set to 0)
+    temp_m = re.search(r"(?<![A-Za-z])(?P<temp>[-+]?[0-9.]+)C(?![A-Za-z])", filename) or re.search(r"(?<![A-Za-z])(?P<temp>[-+]?[0-9.]+)C(?![A-Za-z])", path_str)
+    temp: Optional[float] = float(temp_m.group("temp")) if temp_m else None
+
+    # 6. Stack Count (STACKCNT)
+    stack_m = re.search(r"stack[_\-](?P<stack>[0-9]+)", filename, re.IGNORECASE) or re.search(r"stack[_\-](?P<stack>[0-9]+)", path_str, re.IGNORECASE)
+    stack = int(stack_m.group("stack")) if stack_m else 1
+
+    # 7. Camera (cam_0 ≈ TELE | cam_1 ≈ WIDE)
+    cam_name = None
+    if re.search(r"cam[_\-]?1|\bwide\b", path_str, re.IGNORECASE):
+        cam_name = "WIDE"
+    elif re.search(r"cam[_\-]?0|\btele\b", path_str, re.IGNORECASE):
+        cam_name = "TELE"
+    else:
+        cam_name = "TELE"
+
+    # 8. Filter (ir_1 ≈ Astro, ir_2 ≈ Dual-Band)
+    # Note: DWARF Mini does not have ir_0
+    filter_name = None
+    if re.search(r"ir[_\-]?1|\bastro\b", path_str, re.IGNORECASE):
+        filter_name = "Astro"
+    elif re.search(r"ir[_\-]?2|\bdual\b|\bduo\b|\bband\b|\bnarrow\b", path_str, re.IGNORECASE):
+        filter_name = "Dual-Band"
 
     return {
         "imtype_raw": imtype_raw,
@@ -96,18 +126,25 @@ def parse_filename(filepath: str | Path) -> Dict[str, Any]:
         "YBINNING": binning,
         "CCD-TEMP": temp,
         "STACKCNT": stack,
+        "CAMNAME": cam_name,
+        "FILTER": filter_name,
     }
+
+
+def parse_filename(filepath: str | Path) -> Dict[str, Any]:
+    """Backward compatibility wrapper around parse_filename_and_path."""
+    return parse_filename_and_path(filepath)
 
 
 def calculate_derived_fields(parsed: Dict[str, Any]) -> Dict[str, Any]:
     """
     Calculate derived fields such as total exposure times, pixel sizes, and scale.
     """
-    binning = parsed["XBINNING"]
-    exp = parsed["EXPTIME"]
-    stack = parsed["STACKCNT"]
+    binning = parsed.get("XBINNING", 1)
+    exp = parsed.get("EXPTIME")
+    stack = parsed.get("STACKCNT", 1)
 
-    livetime = exp * stack
+    livetime = (exp * stack) if (exp is not None and stack is not None) else None
     darktime = livetime
     pix_sz = DWARF_MINI_SPECS["NATIVE_PIXEL_SIZE"] * binning
     focal_len = DWARF_MINI_SPECS["FOCALLEN"]
@@ -161,7 +198,7 @@ def update_fits_header(
     if not filepath.is_file():
         raise FileNotFoundError(f"File not found: {filepath}")
 
-    parsed = parse_filename(filepath)
+    parsed = parse_filename_and_path(filepath)
     derived = calculate_derived_fields(parsed)
     disabled_keys = load_disabled_standard_keys(standard_path)
 
@@ -185,7 +222,7 @@ def update_fits_header(
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
         # Key-Value pairs with comments matching FITS_STANDARD.txt
-        header_updates = [
+        header_updates: list[tuple[str, Any, str]] = [
             ("SIMPLE", True, "file does conform to FITS standard"),
             ("BITPIX", header.get("BITPIX", 16), "number of bits per data pixel"),
             ("NAXIS", 2, "number of data axes"),
@@ -194,11 +231,10 @@ def update_fits_header(
             ("EXTEND", True, "FITS dataset may contain extensions"),
             ("BZERO", float(bzero), "Offset data range to that of unsigned short"),
             ("BSCALE", float(bscale), "Default scaling factor"),
-            ("PROGRAM", "DWARF Header Updater v1.0", "Software that created this HDU"),
+            ("PROGRAM", "DWARF Header Updater v1.1", "Software that created this HDU"),
             ("DATE", now_utc, "UTC date that FITS file was created"),
             ("IMAGETYP", parsed["IMAGETYP"], "Type of image"),
             ("ROWORDER", "TOP-DOWN", "Order of the rows in image array"),
-            ("EXPTIME", float(parsed["EXPTIME"]), "[s] Exposure time duration"),
             ("TELESCOP", DWARF_MINI_SPECS["TELESCOP"], "Telescope used to acquire this image"),
             ("FOCALLEN", float(DWARF_MINI_SPECS["FOCALLEN"]), "[mm] Focal length"),
             ("XBINNING", parsed["XBINNING"], "Camera binning mode"),
@@ -206,39 +242,53 @@ def update_fits_header(
             ("XPIXSZ", float(derived["XPIXSZ"]), "[um] Pixel X axis size"),
             ("YPIXSZ", float(derived["YPIXSZ"]), "[um] Pixel Y axis size"),
             ("INSTRUME", DWARF_MINI_SPECS["INSTRUME"], "Instrument name"),
-            ("CCD-TEMP", float(parsed["CCD-TEMP"]), "[degC] CCD temperature"),
-            ("GAIN", parsed["GAIN"], "Sensor gain"),
             ("OFFSET", header.get("OFFSET", 0), "Sensor gain offset"),
             ("BAYERPAT", bayerpat, "Bayer color pattern"),
             ("XBAYROFF", 0, "X offset of Bayer array"),
             ("YBAYROFF", 0, "Y offset of Bayer array"),
+            ("FRAME", parsed["FRAME"], "Frame Type"),
+            ("OBJECT", parsed["FRAME"], "Name of the object of interest"),
+            ("APTDIA", float(DWARF_MINI_SPECS["APTDIA"]), "Telescope diameter (mm)"),
+            ("SCALE", float(derived["SCALE"]), "arcsecs per pixel"),
         ]
+
+        if parsed["EXPTIME"] is not None:
+            header_updates.append(("EXPTIME", float(parsed["EXPTIME"]), "[s] Exposure time duration"))
+
+        if parsed["GAIN"] is not None:
+            header_updates.append(("GAIN", parsed["GAIN"], "Sensor gain"))
+
+        # Temperature: Only add if parsed or pre-existing in header
+        ccd_temp_val = parsed["CCD-TEMP"] if parsed["CCD-TEMP"] is not None else header.get("CCD-TEMP")
+        if ccd_temp_val is not None:
+            header_updates.append(("CCD-TEMP", float(ccd_temp_val), "[degC] CCD temperature"))
 
         # FOCPOS: Only keep if present; do not generate if missing
         if "FOCPOS" in header:
             header_updates.append(("FOCPOS", header["FOCPOS"], "[step] Focuser position"))
 
-        # FOCTEMP: Assumed to be same temperature as sensor (CCD-TEMP) if missing
-        foctemp_val = float(header["FOCTEMP"]) if "FOCTEMP" in header else float(parsed["CCD-TEMP"])
-        header_updates.append((
-            "FOCTEMP",
-            foctemp_val,
-            "[degC] Focuser temp (assumed CCD-TEMP)"
-        ))
+        # FOCTEMP: Only add if pre-existing or derived from CCD-TEMP
+        if "FOCTEMP" in header:
+            header_updates.append(("FOCTEMP", float(header["FOCTEMP"]), "[degC] Focuser temp"))
+        elif ccd_temp_val is not None:
+            header_updates.append(("FOCTEMP", float(ccd_temp_val), "[degC] Focuser temp (assumed CCD-TEMP)"))
 
-        header_updates.extend([
-            ("STACKCNT", parsed["STACKCNT"], "Stack frames"),
-            ("LIVETIME", float(derived["LIVETIME"]), "[s] Exposure time after deadtime correction"),
-            ("OBJECT", parsed["FRAME"], "Name of the object of interest"),
-            ("DARKTIME", float(derived["DARKTIME"]), "Total Dark Exposure Time (s)"),
-            ("FRAME", parsed["FRAME"], "Frame Type"),
-            ("APTDIA", float(DWARF_MINI_SPECS["APTDIA"]), "Telescope diameter (mm)"),
-            ("SCALE", float(derived["SCALE"]), "arcsecs per pixel"),
-        ])
+        if parsed["STACKCNT"] is not None:
+            header_updates.append(("STACKCNT", parsed["STACKCNT"], "Stack frames"))
 
-        # Filter out disabled keys (variables starting with '/' in FITS_STANDARD.txt).
-        # Disabled keys are not automatically generated/applied by the script,
-        # but if pre-existing in the original file header, they are preserved intact.
+        if derived["LIVETIME"] is not None:
+            header_updates.append(("LIVETIME", float(derived["LIVETIME"]), "[s] Exposure time after deadtime correction"))
+
+        if derived["DARKTIME"] is not None:
+            header_updates.append(("DARKTIME", float(derived["DARKTIME"]), "Total Dark Exposure Time (s)"))
+
+        if parsed.get("CAMNAME"):
+            header_updates.append(("CAMNAME", parsed["CAMNAME"], "Camera module (TELE = cam_0, WIDE = cam_1)"))
+
+        if parsed.get("FILTER"):
+            header_updates.append(("FILTER", parsed["FILTER"], "Filter name"))
+
+        # Filter out disabled keys (variables starting with '/' in FITS_STANDARD.txt)
         header_updates = [item for item in header_updates if item[0] not in disabled_keys]
 
         # Non-destructive card update:
@@ -266,10 +316,10 @@ def update_fits_header(
     return save_path
 
 
-def collect_fits_files(paths: list[str], frame_type: str = "dark") -> list[Path]:
+def collect_fits_files(paths: list[str], frame_type: str = "all") -> list[Path]:
     """
     Collect FITS files from a list of paths (files, directories, or glob patterns).
-    When traversing directories, filters for the specified frame_type (e.g. 'dark').
+    When traversing directories, filters for the specified frame_type ('dark', 'flat', 'bias', 'light', 'all').
     """
     collected: list[Path] = []
     seen: set[Path] = set()
@@ -277,14 +327,8 @@ def collect_fits_files(paths: list[str], frame_type: str = "dark") -> list[Path]
     def matches_frame_type(p: Path) -> bool:
         if frame_type == "all":
             return True
-        filename_lower = p.name.lower()
-        parent_parts = [part.lower() for part in p.parts]
-        # Check filename prefix or parent directory names
-        if filename_lower.startswith(f"{frame_type}_") or frame_type in parent_parts:
-            return True
-        # Try regex parse
-        match = FILENAME_REGEX.search(p.name)
-        if match and match.group("imtype").lower() == frame_type:
+        meta = parse_filename_and_path(p)
+        if meta["imtype_raw"] == frame_type.lower():
             return True
         return False
 
@@ -321,7 +365,7 @@ def main() -> None:
     default_input = ["CALI_FRAME"] if Path("CALI_FRAME").is_dir() else []
 
     parser = argparse.ArgumentParser(
-        description="Update FITS header of DWARF Mini calibration master frames based on filename and hardware specs."
+        description="Update FITS header of DWARF Mini calibration master frames based on filename, folder structure, and hardware specs."
     )
     parser.add_argument(
         "fits_files",
@@ -332,8 +376,8 @@ def main() -> None:
     parser.add_argument(
         "--type",
         choices=["dark", "flat", "bias", "light", "all"],
-        default="dark",
-        help="Filter frame type when scanning directories (default: dark)"
+        default="all",
+        help="Filter frame type when scanning directories (default: all)"
     )
     parser.add_argument(
         "--in-place",
@@ -378,7 +422,7 @@ def main() -> None:
         if verbose:
             print(f"\n[{idx}/{len(files_to_process)}] Processing: {fits_file}")
         try:
-            parsed = parse_filename(fits_file)
+            parsed = parse_filename_and_path(fits_file)
             derived = calculate_derived_fields(parsed)
             if verbose:
                 print("  Extracted metadata:")
