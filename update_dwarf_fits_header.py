@@ -49,11 +49,39 @@ IMAGETYP_MAP = {
     "light": ("Light Frame", "Light"),
 }
 
+# Regex matching DWARF raw light sub filenames:
+# Formats: [failed_]<target>_<exp>s<gain>_<filter>_<date>-<time>_<temp>C.fits
+# Examples:
+#   failed_C 20_15s60_Duo-Band_20260814-041951434_37C.fits
+#   C 20_15s60_Duo-Band_20260831-212419715_37C.fits
+RAW_LIGHT_SUB_REGEX = re.compile(
+    r"^(?:failed[_\-])?(?P<target>.+?)[_\-]"
+    r"(?P<exp>[0-9.]+)s(?P<gain>[0-9.]+)[_\-]"
+    r"(?P<filter>[A-Za-z0-9_\-]+)[_\-]"
+    r"(?P<date>\d{8})[_\-]"
+    r"(?P<time>\d{6,9})[_\-]"
+    r"(?P<temp>[-+]?[0-9.]+)C(?:\.fits?)$",
+    re.IGNORECASE
+)
+
+
+def format_date_obs(date_str: str, time_str: str) -> Optional[str]:
+    """Format DWARF date (YYYYMMDD) and time (hhmmssfff) into FITS ISO standard DATE-OBS."""
+    if len(date_str) == 8 and len(time_str) >= 6:
+        yyyy, mm, dd = date_str[:4], date_str[4:6], date_str[6:8]
+        hh, mi, ss = time_str[:2], time_str[2:4], time_str[4:6]
+        ms = time_str[6:]
+        if ms:
+            ms_fmt = ms.ljust(6, '0')[:6]
+            return f"{yyyy}-{mm}-{dd}T{hh}:{mi}:{ss}.{ms_fmt}"
+        return f"{yyyy}-{mm}-{dd}T{hh}:{mi}:{ss}"
+    return None
+
 
 def parse_filename_and_path(filepath: str | Path) -> Dict[str, Any]:
     """
     Parse metadata encoded in the FITS filename and parent directory path structure.
-    Extracts image type, exposure, gain, binning, temperature, stack count, camera module, and filter mode.
+    Extracts image type, target object, exposure, gain, binning, temperature, stack count, camera module, filter mode, and observation date.
     """
     path = Path(filepath)
     filename = path.name
@@ -62,7 +90,46 @@ def parse_filename_and_path(filepath: str | Path) -> Dict[str, Any]:
 
     is_cali_frame = "cali_frame" in parts_lower
 
-    # 1. Image Type (dark, flat, bias, light)
+    # Check for DWARF raw light sub naming convention first
+    match_light = RAW_LIGHT_SUB_REGEX.match(filename)
+    if match_light:
+        target_name = match_light.group("target").strip()
+        exp_val = float(match_light.group("exp"))
+        gain_val = float(match_light.group("gain"))
+        gain = int(gain_val) if gain_val.is_integer() else gain_val
+        temp_val = float(match_light.group("temp"))
+        
+        filt_raw = match_light.group("filter").lower()
+        if "duo" in filt_raw or "dual" in filt_raw or "band" in filt_raw or "ir_2" in filt_raw:
+            filter_name = "Dual-Band"
+        elif "astro" in filt_raw or "ir_1" in filt_raw:
+            filter_name = "Astro"
+        else:
+            filter_name = match_light.group("filter")
+
+        date_obs = format_date_obs(match_light.group("date"), match_light.group("time"))
+
+        cam_name = "TELE"
+        if re.search(r"cam[_\-]?1|\bwide\b", path_str, re.IGNORECASE):
+            cam_name = "WIDE"
+
+        return {
+            "imtype_raw": "light",
+            "IMAGETYP": "Light Frame",
+            "FRAME": "Light",
+            "OBJECT": target_name,
+            "EXPTIME": exp_val,
+            "GAIN": gain,
+            "XBINNING": 1,
+            "YBINNING": 1,
+            "CCD-TEMP": temp_val,
+            "STACKCNT": 1,
+            "CAMNAME": cam_name,
+            "FILTER": filter_name,
+            "DATE-OBS": date_obs,
+        }
+
+    # Fallback / Calibration Frame Parsing
     imtype_raw = None
     for cand in ("bias", "flat", "dark", "light"):
         if re.search(r"(?:^|[_\-/\\])" + cand + r"(?:[_\-/\\]|\.fits?)", path_str, re.IGNORECASE):
@@ -76,38 +143,42 @@ def parse_filename_and_path(filepath: str | Path) -> Dict[str, Any]:
 
     imtype, frame = IMAGETYP_MAP.get(imtype_raw, ("Light Frame", "Light"))
 
-    # 2. Exposure time (EXPTIME)
+    # Exposure & Gain parsing (check exp_<sec> and gain_<val> as well as <exp>s<gain>)
     exp_m = re.search(r"exp[_\-](?P<exp>[0-9.]+)", filename, re.IGNORECASE) or re.search(r"exp[_\-](?P<exp>[0-9.]+)", path_str, re.IGNORECASE)
+    gain_m = re.search(r"gain[_\-](?P<gain>[0-9.]+)", filename, re.IGNORECASE) or re.search(r"gain[_\-](?P<gain>[0-9.]+)", path_str, re.IGNORECASE)
+    exp_gain_m = re.search(r"(?<![A-Za-z0-9])(?P<exp>[0-9.]+)s(?P<gain>[0-9.]+)(?![A-Za-z0-9])", filename)
+
     if exp_m:
         exp: Optional[float] = float(exp_m.group("exp"))
+    elif exp_gain_m:
+        exp = float(exp_gain_m.group("exp"))
     elif imtype_raw == "bias":
         exp = 0.0
     else:
         exp = None
 
-    # 3. Gain (GAIN)
-    gain_m = re.search(r"gain[_\-](?P<gain>[0-9.]+)", filename, re.IGNORECASE) or re.search(r"gain[_\-](?P<gain>[0-9.]+)", path_str, re.IGNORECASE)
     if gain_m:
         gain_val = float(gain_m.group("gain"))
         gain: Optional[Union[int, float]] = int(gain_val) if gain_val.is_integer() else gain_val
+    elif exp_gain_m:
+        gain_val = float(exp_gain_m.group("gain"))
+        gain = int(gain_val) if gain_val.is_integer() else gain_val
     else:
         gain = None
 
-    # 4. Binning (XBINNING / YBINNING)
+    # Binning
     bin_m = re.search(r"bin[_\-](?P<bin>[0-9]+)", filename, re.IGNORECASE) or re.search(r"bin[_\-](?P<bin>[0-9]+)", path_str, re.IGNORECASE)
     binning = int(bin_m.group("bin")) if bin_m else 1
 
-    # 5. Temperature (CCD-TEMP)
-    # Require preceded by non-letter, e.g. 33C, -10C, 33.5C
-    # If no temperature is explicitly in filename or folder name, temp is None (do NOT set to 0)
+    # Temperature (CCD-TEMP)
     temp_m = re.search(r"(?<![A-Za-z])(?P<temp>[-+]?[0-9.]+)C(?![A-Za-z])", filename) or re.search(r"(?<![A-Za-z])(?P<temp>[-+]?[0-9.]+)C(?![A-Za-z])", path_str)
     temp: Optional[float] = float(temp_m.group("temp")) if temp_m else None
 
-    # 6. Stack Count (STACKCNT)
+    # Stack Count
     stack_m = re.search(r"stack[_\-](?P<stack>[0-9]+)", filename, re.IGNORECASE) or re.search(r"stack[_\-](?P<stack>[0-9]+)", path_str, re.IGNORECASE)
     stack = int(stack_m.group("stack")) if stack_m else 1
 
-    # 7. Camera (cam_0 ≈ TELE | cam_1 ≈ WIDE)
+    # Camera (cam_0 ≈ TELE | cam_1 ≈ WIDE)
     cam_name = None
     if re.search(r"cam[_\-]?1|\bwide\b", path_str, re.IGNORECASE):
         cam_name = "WIDE"
@@ -116,8 +187,7 @@ def parse_filename_and_path(filepath: str | Path) -> Dict[str, Any]:
     else:
         cam_name = "TELE"
 
-    # 8. Filter (ir_1 ≈ Astro, ir_2 ≈ Dual-Band)
-    # Note: DWARF Mini does not have ir_0
+    # Filter
     filter_name = None
     if re.search(r"ir[_\-]?1|\bastro\b", path_str, re.IGNORECASE):
         filter_name = "Astro"
@@ -128,6 +198,7 @@ def parse_filename_and_path(filepath: str | Path) -> Dict[str, Any]:
         "imtype_raw": imtype_raw,
         "IMAGETYP": imtype,
         "FRAME": frame,
+        "OBJECT": frame,
         "EXPTIME": exp,
         "GAIN": gain,
         "XBINNING": binning,
@@ -234,14 +305,12 @@ def update_fits_header(
         if parsed["imtype_raw"] != "dark" and "DARKTIME" in header:
             del header["DARKTIME"]
 
-        # Auto-correct misclassified image type headers on Light frames (e.g. from previous script runs)
+        # Auto-correct misclassified image type headers and populate OBJECT on Light frames
         if parsed["imtype_raw"] == "light":
-            if header.get("IMAGETYP") in ("Dark Frame", "Dark"):
-                header["IMAGETYP"] = (parsed["IMAGETYP"], "Type of image")
-            if header.get("FRAME") in ("Dark Frame", "Dark"):
-                header["FRAME"] = (parsed["FRAME"], "Frame Type")
-            if header.get("OBJECT") in ("Dark Frame", "Dark"):
-                header["OBJECT"] = (parsed["FRAME"], "Name of the object of interest")
+            header["IMAGETYP"] = (parsed["IMAGETYP"], "Type of image")
+            header["FRAME"] = (parsed["FRAME"], "Frame Type")
+            target_obj = parsed.get("OBJECT") if parsed.get("OBJECT") else "Light"
+            header["OBJECT"] = (target_obj, "Name of the object of interest")
 
         # Key-Value pairs with comments matching FITS_STANDARD.txt
         header_updates: list[tuple[str, Any, str]] = [
@@ -253,7 +322,7 @@ def update_fits_header(
             ("EXTEND", True, "FITS dataset may contain extensions"),
             ("BZERO", float(bzero), "Offset data range to that of unsigned short"),
             ("BSCALE", float(bscale), "Default scaling factor"),
-            ("PROGRAM", "DWARF Header Updater v1.2", "Software that created this HDU"),
+            ("PROGRAM", "DWARF Header Updater v1.3", "Software that created this HDU"),
             ("DATE", now_utc, "UTC date that FITS file was created"),
             ("IMAGETYP", parsed["IMAGETYP"], "Type of image"),
             ("ROWORDER", "TOP-DOWN", "Order of the rows in image array"),
@@ -269,10 +338,13 @@ def update_fits_header(
             ("XBAYROFF", 0, "X offset of Bayer array"),
             ("YBAYROFF", 0, "Y offset of Bayer array"),
             ("FRAME", parsed["FRAME"], "Frame Type"),
-            ("OBJECT", parsed["FRAME"], "Name of the object of interest"),
+            ("OBJECT", parsed.get("OBJECT", parsed["FRAME"]), "Name of the object of interest"),
             ("APTDIA", float(DWARF_MINI_SPECS["APTDIA"]), "Telescope diameter (mm)"),
             ("SCALE", float(derived["SCALE"]), "arcsecs per pixel"),
         ]
+
+        if parsed.get("DATE-OBS"):
+            header_updates.append(("DATE-OBS", parsed["DATE-OBS"], "YYYY-MM-DDThh:mm:ss observation start"))
 
         if parsed["EXPTIME"] is not None:
             header_updates.append(("EXPTIME", float(parsed["EXPTIME"]), "[s] Exposure time duration"))
