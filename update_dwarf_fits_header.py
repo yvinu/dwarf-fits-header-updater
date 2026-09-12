@@ -291,7 +291,8 @@ def update_fits_header(
         # Determine dimensions and bitpix
         naxis1 = data.shape[1] if data is not None and data.ndim >= 2 else header.get("NAXIS1", 1920)
         naxis2 = data.shape[0] if data is not None and data.ndim >= 2 else header.get("NAXIS2", 1080)
-        
+        naxis_val = 2 if (data is None or data.ndim <= 2) else data.ndim
+
         # Bayer pattern check
         bayerpat = header.get("BAYERPAT", "RGGB    ")
 
@@ -305,6 +306,12 @@ def update_fits_header(
         if parsed["imtype_raw"] != "dark" and "DARKTIME" in header:
             del header["DARKTIME"]
 
+        # STACKCNT handling: if stack count is 1 (or unstated), remove STACKCNT card if present and do not create it
+        stack_cnt = parsed.get("STACKCNT", 1)
+        if stack_cnt is None or stack_cnt <= 1:
+            if "STACKCNT" in header:
+                del header["STACKCNT"]
+
         # Auto-correct misclassified image type headers and populate OBJECT on Light frames
         if parsed["imtype_raw"] == "light":
             header["IMAGETYP"] = (parsed["IMAGETYP"], "Type of image")
@@ -312,17 +319,19 @@ def update_fits_header(
             target_obj = parsed.get("OBJECT") if parsed.get("OBJECT") else "Light"
             header["OBJECT"] = (target_obj, "Name of the object of interest")
 
+        # Ensure correct axis cards
+        header["NAXIS"] = (naxis_val, "number of data axes")
+        header["NAXIS1"] = (naxis1, "length of data axis 1")
+        header["NAXIS2"] = (naxis2, "length of data axis 2")
+
         # Key-Value pairs with comments matching FITS_STANDARD.txt
         header_updates: list[tuple[str, Any, str]] = [
             ("SIMPLE", True, "file does conform to FITS standard"),
             ("BITPIX", header.get("BITPIX", 16), "number of bits per data pixel"),
-            ("NAXIS", 2, "number of data axes"),
-            ("NAXIS1", naxis1, "length of data axis 1"),
-            ("NAXIS2", naxis2, "length of data axis 2"),
             ("EXTEND", True, "FITS dataset may contain extensions"),
             ("BZERO", float(bzero), "Offset data range to that of unsigned short"),
             ("BSCALE", float(bscale), "Default scaling factor"),
-            ("PROGRAM", "DWARF Header Updater v1.3", "Software that created this HDU"),
+            ("PROGRAM", "DWARF Header Updater v1.4", "Software that created this HDU"),
             ("DATE", now_utc, "UTC date that FITS file was created"),
             ("IMAGETYP", parsed["IMAGETYP"], "Type of image"),
             ("ROWORDER", "TOP-DOWN", "Order of the rows in image array"),
@@ -367,8 +376,9 @@ def update_fits_header(
         elif ccd_temp_val is not None:
             header_updates.append(("FOCTEMP", float(ccd_temp_val), "[degC] Focuser temp (assumed CCD-TEMP)"))
 
-        if parsed["STACKCNT"] is not None:
-            header_updates.append(("STACKCNT", parsed["STACKCNT"], "Stack frames"))
+        # STACKCNT: Only add if stack count > 1 (pre-stacked masters)
+        if stack_cnt is not None and stack_cnt > 1:
+            header_updates.append(("STACKCNT", stack_cnt, "Stack frames"))
 
         if derived["LIVETIME"] is not None:
             header_updates.append(("LIVETIME", float(derived["LIVETIME"]), "[s] Exposure time after deadtime correction"))
